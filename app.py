@@ -14,6 +14,9 @@ API_BASE = "https://musicbrainz.org/ws/2/release"
 # MusicBrainz asks for a descriptive User-Agent with contact
 USER_AGENT = "EricMusicDateFinder/1.0 (eric.s.jaffe@gmail.com)"
 
+# Max number of years we’ll process in a single request
+MAX_YEARS_PER_REQUEST = 25
+
 app = Flask(__name__)
 
 HTML_TEMPLATE = """
@@ -150,7 +153,7 @@ HTML_TEMPLATE = """
 """
 
 
-def search_releases_for_date(year: int, mm_dd: str, limit: int = 100):
+def search_releases_for_date(year: int, mm_dd: str, limit: int = 50):
     """
     Call MusicBrainz search:
       /ws/2/release/?query=date:YYYY-MM-DD&fmt=json&limit=...
@@ -178,17 +181,19 @@ def index():
     results = None
     current_year = datetime.now().year
 
-    date_value = None
-    start_year = None
-    end_year = None
-    pretty_date = None
+    # Defaults for first load / GET
+    date_value = datetime.now().strftime("%Y-%m-%d")
+    start_year = 1990
+    end_year = current_year
+    pretty_date = ""
 
     if request.method == "POST":
+        # Get form values
         date_value = request.form.get("date", "").strip()
         start_str = request.form.get("start_year", "").strip()
         end_str = request.form.get("end_year", "").strip()
 
-        # Defaults
+        # Parse date
         try:
             _dt = datetime.strptime(date_value, "%Y-%m-%d")
             mm_dd = date_value[5:]  # "YYYY-MM-DD" -> "MM-DD"
@@ -197,6 +202,7 @@ def index():
             error = "Invalid date. Please use the date picker."
             mm_dd = None
 
+        # Parse years with defaults
         try:
             start_year = int(start_str) if start_str else 1990
             end_year = int(end_str) if end_str else current_year
@@ -207,13 +213,25 @@ def index():
             start_year = 1990
             end_year = current_year
 
+        # Clamp the range so we don't time out
         if not error and mm_dd:
+            year_span = end_year - start_year + 1
+            if year_span > MAX_YEARS_PER_REQUEST:
+                original_end = end_year
+                end_year = start_year + MAX_YEARS_PER_REQUEST - 1
+                if end_year > current_year:
+                    end_year = current_year
+                error = (error + " | " if error else "") + (
+                    f"Year range too large ({year_span} years). "
+                    f"Showing only {start_year}–{end_year}. "
+                    f"Try smaller chunks like 1990–2010, then 2011–{current_year}."
+                )
+
             results = []
             for year in range(start_year, end_year + 1):
                 try:
-                    releases = search_releases_for_date(year, mm_dd, limit=100)
+                    releases = search_releases_for_date(year, mm_dd, limit=50)
                 except requests.HTTPError as e:
-                    # Log minimal info in UI
                     error = f"HTTP error for year {year}: {e}"
                     break
                 except Exception as e:
@@ -230,6 +248,7 @@ def index():
                     mbid = r.get("id")
                     url = f"https://musicbrainz.org/release/{mbid}" if mbid else None
 
+                    # use a tiny object so template can do r.year, r.title, etc.
                     results.append(
                         type("Release", (object,), {
                             "year": year,
@@ -240,10 +259,10 @@ def index():
                         })
                     )
 
-                # Be polite with MusicBrainz; tweak if you want faster
-                time.sleep(0.5)
+                # Be polite with MusicBrainz but not too slow
+                time.sleep(0.1)
 
-            # Sort results nicely
+            # Sort nicely
             if results:
                 results.sort(key=lambda x: (x.year, x.artist or "", x.title or ""))
 
@@ -260,5 +279,5 @@ def index():
 
 
 if __name__ == "__main__":
-    # Run directly: python app.py
+    # Local dev only; Render will use gunicorn app:app
     app.run(host="0.0.0.0", port=5000, debug=True)
